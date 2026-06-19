@@ -307,7 +307,9 @@ def group_into_questions(
         questions.append(
             {
                 "trace_id": trace_id,
-                "name": first.get("name") or "",
+                # Prefer the trace's name (e.g. "lightdash-agent.stream"); fall
+                # back to the first generation's name.
+                "name": trace.get("name") or first.get("name") or "",
                 "start_time": min(starts).isoformat() if starts else "",
                 "generations": len(gens),
                 "ttft_seconds": ttft,
@@ -430,6 +432,15 @@ def cmd_range(args: argparse.Namespace) -> None:
 
     questions = group_into_questions(generations, client)
 
+    # Filter by trace name (e.g. "lightdash-agent.stream"). The trace name only
+    # becomes known after group_into_questions resolves each trace, so this is a
+    # client-side filter rather than an API parameter.
+    if args.trace_name:
+        questions = [q for q in questions if q["name"] == args.trace_name]
+        if not questions:
+            print(f"No questions with trace name {args.trace_name!r}.")
+            return
+
     ttft_values = [
         q["ttft_seconds"] for q in questions if q["ttft_seconds"] is not None
     ]
@@ -530,6 +541,10 @@ def main() -> None:
         help="ISO-8601 end, e.g. 2026-06-19T00:00:00Z",
     )
     p_range.add_argument("--name", help="Filter by generation name")
+    p_range.add_argument(
+        "--trace-name",
+        help="Filter by trace name, e.g. lightdash-agent.stream",
+    )
     p_range.add_argument("--csv", help="Write per-question rows to this path")
     p_range.set_defaults(func=cmd_range)
 
