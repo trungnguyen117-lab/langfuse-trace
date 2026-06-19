@@ -49,6 +49,7 @@ import sys
 from datetime import datetime, timezone
 
 import requests
+from dotenv import load_dotenv
 
 DEFAULT_BASE_URL = "https://cloud.langfuse.com"
 PAGE_LIMIT = 100
@@ -450,6 +451,10 @@ def cmd_range(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # Load LANGFUSE_* vars from a local .env (real env vars still take
+    # precedence — load_dotenv does not override what's already set).
+    load_dotenv()
+
     parser = argparse.ArgumentParser(
         description="Query Langfuse for TTFT and total generation time.",
     )
