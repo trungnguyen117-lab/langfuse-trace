@@ -516,42 +516,63 @@ def cmd_range(args: argparse.Namespace) -> None:
     ]
     missing_ttft = sum(1 for q in questions if q["ttft_seconds"] is None)
 
-    print(
+    # Statistics rows, computed once and reused for display + exports.
+    stats = [
+        {
+            "metric": "TTFT",
+            "count": len(ttft_values),
+            "mean": mean(ttft_values),
+            "p95": percentile(ttft_values, 0.95),
+        },
+        {
+            "metric": "total",
+            "count": len(total_values),
+            "mean": mean(total_values),
+            "p95": percentile(total_values, 0.95),
+        },
+    ]
+
+    # Build the human-readable report as a list of lines so the exact same text
+    # can be printed and written to the --txt file.
+    table_header = (
+        f"{'start_time':<26} {'obs':>5} {'TTFT':>10} {'total':>10}  question"
+    )
+    lines: list[str] = []
+    lines.append(
         f"{len(questions)} question(s) / {len(generations)} generation(s) "
         f"[{getattr(args, 'from')} → {args.to}]"
         + (f" name={args.name}" if args.name else "")
-        + "\n"
+        + (f" trace-name={args.trace_name}" if args.trace_name else "")
     )
-
-    header = (
-        f"{'start_time':<26} {'obs':>5} {'TTFT':>10} {'total':>10}  question"
-    )
-    print(header)
-    print("-" * len(header))
+    lines.append("")
+    lines.append(table_header)
+    lines.append("-" * len(table_header))
     for q in questions:
-        print(
+        lines.append(
             f"{q['start_time']:<26} {q['observations']:>5} "
             f"{fmt(q['ttft_seconds']):>10} {fmt(q['total_seconds']):>10}  "
             f"{truncate(q['question'], 60)}"
         )
 
-    print("\n" + "=" * len(header))
-    print("Statistics per question (seconds)")
-    print(f"{'metric':<16} {'count':>8} {'mean':>10} {'p95':>10}")
-    print(
-        f"{'TTFT':<16} {len(ttft_values):>8} "
-        f"{fmt(mean(ttft_values)):>10} {fmt(percentile(ttft_values, 0.95)):>10}"
-    )
-    print(
-        f"{'total':<16} {len(total_values):>8} "
-        f"{fmt(mean(total_values)):>10} {fmt(percentile(total_values, 0.95)):>10}"
-    )
+    lines.append("")
+    lines.append("=" * len(table_header))
+    lines.append("Statistics per question (seconds)")
+    lines.append(f"{'metric':<16} {'count':>8} {'mean':>10} {'p95':>10}")
+    for s in stats:
+        lines.append(
+            f"{s['metric']:<16} {s['count']:>8} "
+            f"{fmt(s['mean']):>10} {fmt(s['p95']):>10}"
+        )
     if missing_ttft:
-        print(
-            f"\nNote: {missing_ttft}/{len(questions)} question(s) had no "
-            "completionStartTime on the first generation (non-streamed) — "
+        lines.append("")
+        lines.append(
+            f"Note: {missing_ttft}/{len(questions)} question(s) had no "
+            "timeToFirstToken on the first generation (non-streamed) — "
             "excluded from TTFT stats."
         )
+
+    report = "\n".join(lines)
+    print(report)
 
     if args.csv:
         with open(args.csv, "w", encoding="utf-8", newline="") as csv_file:
@@ -571,6 +592,20 @@ def cmd_range(args: argparse.Namespace) -> None:
             writer.writeheader()
             writer.writerows(questions)
         print(f"\nWrote {len(questions)} rows to {args.csv}")
+
+    if args.stats_csv:
+        with open(args.stats_csv, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=["metric", "count", "mean", "p95"]
+            )
+            writer.writeheader()
+            writer.writerows(stats)
+        print(f"Wrote statistics to {args.stats_csv}")
+
+    if args.txt:
+        with open(args.txt, "w", encoding="utf-8") as f:
+            f.write(report + "\n")
+        print(f"Wrote report to {args.txt}")
 
 
 def main() -> None:
@@ -613,6 +648,12 @@ def main() -> None:
         help="Filter by trace name, e.g. lightdash-agent.stream",
     )
     p_range.add_argument("--csv", help="Write per-question rows to this path")
+    p_range.add_argument(
+        "--stats-csv", help="Write the statistics table (metric/count/mean/p95) as CSV"
+    )
+    p_range.add_argument(
+        "--txt", help="Write the full readable report (tables) to this text file"
+    )
     p_range.set_defaults(func=cmd_range)
 
     args = parser.parse_args()
