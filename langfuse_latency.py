@@ -223,7 +223,10 @@ def earliest_start(obs: dict) -> datetime:
     return ts if ts is not None else datetime.max.replace(tzinfo=timezone.utc)
 
 
-def group_into_questions(generations: list[dict]) -> list[dict]:
+def group_into_questions(
+    generations: list[dict],
+    client: LangfuseClient | None = None,
+) -> list[dict]:
     """Aggregate generations by trace into one row per question.
 
     A question = a trace (which may contain several model calls). Per the
@@ -234,6 +237,11 @@ def group_into_questions(generations: list[dict]) -> list[dict]:
       Total of the question = max(endTime) - min(startTime) across the trace's
                               generations (covers the tool-calling steps in
                               between).
+
+    When `client` is given, the question/answer text is read from the trace's
+    own `input`/`output` (some integrations — e.g. the Vercel AI SDK — log Q&A
+    only at the trace level and leave each generation's input/output null), and
+    only falls back to the generations when the trace has none.
     """
     by_trace: dict[str, list[dict]] = {}
     for obs in generations:
@@ -256,6 +264,20 @@ def group_into_questions(generations: list[dict]) -> list[dict]:
             else None
         )
 
+        # Default: first call's user message / last call's output. When a
+        # client is available, prefer the trace's own input/output.
+        question = extract_question(first.get("input"))
+        answer = extract_answer(last.get("output"))
+        if client is not None and trace_id:
+            try:
+                trace = client.fetch_trace(trace_id)
+            except requests.HTTPError:
+                trace = {}
+            if trace.get("input") is not None:
+                question = content_to_text(trace["input"])
+            if trace.get("output") is not None:
+                answer = content_to_text(trace["output"])
+
         questions.append(
             {
                 "trace_id": trace_id,
@@ -264,10 +286,8 @@ def group_into_questions(generations: list[dict]) -> list[dict]:
                 "generations": len(gens),
                 "ttft_seconds": ttft,
                 "total_seconds": total,
-                # Question = first call's user message; answer = last call's
-                # output (after any tool-calling steps in between).
-                "question": extract_question(first.get("input")),
-                "answer": extract_answer(last.get("output")),
+                "question": question,
+                "answer": answer,
             }
         )
 
@@ -382,7 +402,7 @@ def cmd_range(args: argparse.Namespace) -> None:
         print("No generations found in the given window.")
         return
 
-    questions = group_into_questions(generations)
+    questions = group_into_questions(generations, client)
 
     ttft_values = [
         q["ttft_seconds"] for q in questions if q["ttft_seconds"] is not None
