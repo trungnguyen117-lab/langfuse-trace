@@ -134,21 +134,37 @@ def parse_ts(value: str | None) -> datetime | None:
 
 
 def compute_timings(obs: dict) -> tuple[float | None, float | None]:
-    """Return (ttft_seconds, total_seconds), each None when not derivable."""
-    start = parse_ts(obs.get("startTime"))
-    end = parse_ts(obs.get("endTime"))
-    completion_start = parse_ts(obs.get("completionStartTime"))
+    """Return (ttft_seconds, total_seconds) for a single generation.
 
-    ttft = (
-        (completion_start - start).total_seconds()
-        if start is not None and completion_start is not None
-        else None
-    )
-    total = (
-        (end - start).total_seconds()
-        if start is not None and end is not None
-        else None
-    )
+    Langfuse already computes both per observation, so we use its native fields
+    when present:
+
+      ttft  = `timeToFirstToken` (seconds)
+      total = `latency`          (seconds)
+
+    Older / non-streamed observations may lack these; we then fall back to
+    deriving them from the raw timestamps.
+    """
+    ttft = obs.get("timeToFirstToken")
+    if not isinstance(ttft, (int, float)):
+        start = parse_ts(obs.get("startTime"))
+        completion_start = parse_ts(obs.get("completionStartTime"))
+        ttft = (
+            (completion_start - start).total_seconds()
+            if start is not None and completion_start is not None
+            else None
+        )
+
+    total = obs.get("latency")
+    if not isinstance(total, (int, float)):
+        start = parse_ts(obs.get("startTime"))
+        end = parse_ts(obs.get("endTime"))
+        total = (
+            (end - start).total_seconds()
+            if start is not None and end is not None
+            else None
+        )
+
     return ttft, total
 
 
@@ -252,31 +268,41 @@ def group_into_questions(
         gens_sorted = sorted(gens, key=earliest_start)
         first = gens_sorted[0]
         last = gens_sorted[-1]
+        # TTFT of the question = TTFT of the earliest generation.
         ttft, _ = compute_timings(first)
 
         starts = [parse_ts(o.get("startTime")) for o in gens]
         ends = [parse_ts(o.get("endTime")) for o in gens]
         starts = [s for s in starts if s is not None]
         ends = [e for e in ends if e is not None]
-        total = (
-            (max(ends) - min(starts)).total_seconds()
-            if starts and ends
-            else None
-        )
 
-        # Default: first call's user message / last call's output. When a
-        # client is available, prefer the trace's own input/output.
-        question = extract_question(first.get("input"))
-        answer = extract_answer(last.get("output"))
+        # Fetch the trace once: it carries the question/answer text and the
+        # authoritative end-to-end latency.
+        trace: dict = {}
         if client is not None and trace_id:
             try:
                 trace = client.fetch_trace(trace_id)
             except requests.HTTPError:
                 trace = {}
-            if trace.get("input") is not None:
-                question = content_to_text(trace["input"])
-            if trace.get("output") is not None:
-                answer = content_to_text(trace["output"])
+
+        # Total time = the trace's own latency when available, else span from
+        # earliest generation start to latest generation end.
+        trace_latency = trace.get("latency")
+        if isinstance(trace_latency, (int, float)):
+            total = float(trace_latency)
+        elif starts and ends:
+            total = (max(ends) - min(starts)).total_seconds()
+        else:
+            total = None
+
+        # Q&A: prefer the trace's own input/output (some integrations log Q&A
+        # only at the trace level), else fall back to the generations.
+        question = extract_question(first.get("input"))
+        answer = extract_answer(last.get("output"))
+        if trace.get("input") is not None:
+            question = content_to_text(trace["input"])
+        if trace.get("output") is not None:
+            answer = content_to_text(trace["output"])
 
         questions.append(
             {
