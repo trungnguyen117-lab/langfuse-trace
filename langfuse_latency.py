@@ -55,8 +55,10 @@ DEFAULT_BASE_URL = "https://cloud.langfuse.com"
 PAGE_LIMIT = 100
 REQUEST_TIMEOUT = 30
 # The generation whose timeToFirstToken defines the question's TTFT — the first
-# streamed model call inside the lightdash-agent.stream trace.
+# streamed model call inside the lightdash-agent.stream span.
 TTFT_GENERATION_NAME = "ai.streamText.doStream"
+# The agent span that the TTFT generation must live under.
+TTFT_ROOT_SPAN_NAME = "lightdash-agent.stream"
 
 
 class LangfuseClient:
@@ -242,6 +244,58 @@ def earliest_start(obs: dict) -> datetime:
     return ts if ts is not None else datetime.max.replace(tzinfo=timezone.utc)
 
 
+def _descends_from_span(
+    obs: dict, by_id: dict[str, dict], span_name: str, max_depth: int = 50
+) -> bool:
+    """True if `obs` has an ancestor observation named `span_name`.
+
+    Walks up the `parentObservationId` chain (guarding against cycles and
+    missing links).
+    """
+    parent_id = obs.get("parentObservationId")
+    depth = 0
+    while parent_id and depth < max_depth:
+        parent = by_id.get(parent_id)
+        if parent is None:
+            break
+        if parent.get("name") == span_name:
+            return True
+        parent_id = parent.get("parentObservationId")
+        depth += 1
+    return False
+
+
+def select_ttft_generation(
+    trace: dict, generations_sorted: list[dict]
+) -> dict | None:
+    """Pick the generation whose `timeToFirstToken` defines the question's TTFT.
+
+    Preference order:
+      1. The earliest `ai.streamText.doStream` that lives under the
+         `lightdash-agent.stream` span (uses the trace's full observation tree).
+      2. The earliest `ai.streamText.doStream` among the fetched generations.
+      3. The overall earliest generation.
+    """
+    all_obs = (trace or {}).get("observations") or []
+    by_id = {o.get("id"): o for o in all_obs if o.get("id")}
+    inside = [
+        o
+        for o in all_obs
+        if o.get("type") == "GENERATION"
+        and o.get("name") == TTFT_GENERATION_NAME
+        and _descends_from_span(o, by_id, TTFT_ROOT_SPAN_NAME)
+    ]
+    if inside:
+        return min(inside, key=earliest_start)
+
+    stream = [
+        g for g in generations_sorted if g.get("name") == TTFT_GENERATION_NAME
+    ]
+    if stream:
+        return stream[0]
+    return generations_sorted[0] if generations_sorted else None
+
+
 def group_into_questions(
     generations: list[dict],
     client: LangfuseClient | None = None,
@@ -271,29 +325,26 @@ def group_into_questions(
         gens_sorted = sorted(gens, key=earliest_start)
         first = gens_sorted[0]
         last = gens_sorted[-1]
-        # TTFT of the question = timeToFirstToken of the first
-        # `ai.streamText.doStream` generation to appear in the trace (earliest
-        # startTime). Restrict to that name so other generation types can't
-        # take its place; fall back to the overall earliest if none match.
-        stream_gens = [
-            g for g in gens_sorted if g.get("name") == TTFT_GENERATION_NAME
-        ]
-        ttft_source = stream_gens[0] if stream_gens else first
-        ttft, _ = compute_timings(ttft_source)
 
         starts = [parse_ts(o.get("startTime")) for o in gens]
         ends = [parse_ts(o.get("endTime")) for o in gens]
         starts = [s for s in starts if s is not None]
         ends = [e for e in ends if e is not None]
 
-        # Fetch the trace once: it carries the question/answer text and the
-        # authoritative end-to-end latency.
+        # Fetch the trace once: it carries the question/answer text, the
+        # authoritative end-to-end latency, and the full observation tree.
         trace: dict = {}
         if client is not None and trace_id:
             try:
                 trace = client.fetch_trace(trace_id)
             except requests.HTTPError:
                 trace = {}
+
+        # TTFT of the question = timeToFirstToken of the first
+        # `ai.streamText.doStream` that lives under the lightdash-agent.stream
+        # span (resolved via the trace's observation tree).
+        ttft_source = select_ttft_generation(trace, gens_sorted)
+        ttft, _ = compute_timings(ttft_source) if ttft_source else (None, None)
 
         # Total time = the trace's own latency when available, else span from
         # earliest generation start to latest generation end.
@@ -402,10 +453,14 @@ def cmd_trace(args: argparse.Namespace) -> None:
         total_question = (max(ends) - min(starts)).total_seconds()
 
     gens_sorted = sorted(generations, key=earliest_start)
-    # TTFT of the question = TTFT of the earliest generation (first token the
-    # user actually sees). Q&A: prefer the trace's own input/output, else fall
-    # back to the first call's input and the last call's output.
-    question_ttft, _ = compute_timings(gens_sorted[0])
+    # TTFT of the question = timeToFirstToken of the first ai.streamText.doStream
+    # under the lightdash-agent.stream span. Q&A: prefer the trace's own
+    # input/output, else fall back to the first call's input / last call's
+    # output.
+    ttft_source = select_ttft_generation(trace, gens_sorted)
+    question_ttft, _ = (
+        compute_timings(ttft_source) if ttft_source else (None, None)
+    )
     question = trace.get("input") if trace.get("input") is not None else None
     question = (
         content_to_text(question)
