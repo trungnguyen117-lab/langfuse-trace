@@ -1,4 +1,3 @@
-import json
 import sys
 import argparse
 
@@ -12,27 +11,41 @@ client = L.build_client(ns)
 
 trace_id = sys.argv[1]
 
-# --- Trace level: name + latency ---
-trace = client.fetch_trace(trace_id)
-print("=== TRACE LEVEL ===")
-print("  name   :", trace.get("name"))
-print("  latency:", trace.get("latency"), f"({type(trace.get('latency')).__name__})")
-print()
+# Pull ALL observations (every type), so we can see SPAN -> GENERATION nesting.
+obs = client._get(
+    "/api/public/observations",
+    {"traceId": trace_id, "limit": 100},
+).get("data", [])
 
-# --- Generations: dump every key + time-related fields + metadata ---
-gens = client.fetch_generations(trace_id=trace_id)
-print(f"=== {len(gens)} GENERATION(S) ===")
-for i, g in enumerate(gens):
-    print(f"--- #{i} name={g.get('name')!r} ---")
-    print("  all keys:", sorted(g.keys()))
-    for k in ("startTime", "completionStartTime", "endTime", "latency", "timeToFirstToken"):
-        print(f"    {k}: {g.get(k)!r}")
-    md = g.get("metadata")
-    print("    metadata type:", type(md).__name__)
-    if isinstance(md, dict):
-        # surface anything that smells like first-token / timing
-        hits = {k: v for k, v in md.items()
-                if any(s in k.lower() for s in ("token", "chunk", "first", "latency", "ms", "time"))}
-        print("    metadata timing-ish:", json.dumps(hits, ensure_ascii=False)[:500])
-        print("    metadata all keys:", sorted(md.keys())[:40])
-    print()
+print(f"{len(obs)} observation(s) in trace {trace_id}\n")
+
+by_id = {o["id"]: o for o in obs}
+children: dict = {}
+for o in obs:
+    children.setdefault(o.get("parentObservationId"), []).append(o)
+
+
+def short(o):
+    return (
+        f"[{o.get('type')}] {o.get('name')!r} "
+        f"start={o.get('startTime')} "
+        f"ttft={o.get('timeToFirstToken')} latency={o.get('latency')}"
+    )
+
+
+def walk(parent_id, depth):
+    kids = sorted(
+        children.get(parent_id, []),
+        key=lambda o: o.get("startTime") or "",
+    )
+    for o in kids:
+        print("  " * depth + "- " + short(o))
+        walk(o["id"], depth + 1)
+
+
+# Roots = observations whose parent is missing or not in this trace.
+roots = [o for o in obs if o.get("parentObservationId") not in by_id]
+roots.sort(key=lambda o: o.get("startTime") or "")
+for r in roots:
+    print(short(r))
+    walk(r["id"], 1)
