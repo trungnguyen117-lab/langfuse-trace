@@ -54,6 +54,9 @@ from dotenv import load_dotenv
 DEFAULT_BASE_URL = "https://cloud.langfuse.com"
 PAGE_LIMIT = 100
 REQUEST_TIMEOUT = 30
+# The generation whose timeToFirstToken defines the question's TTFT — the first
+# streamed model call inside the lightdash-agent.stream trace.
+TTFT_GENERATION_NAME = "ai.streamText.doStream"
 
 
 class LangfuseClient:
@@ -268,8 +271,15 @@ def group_into_questions(
         gens_sorted = sorted(gens, key=earliest_start)
         first = gens_sorted[0]
         last = gens_sorted[-1]
-        # TTFT of the question = TTFT of the earliest generation.
-        ttft, _ = compute_timings(first)
+        # TTFT of the question = timeToFirstToken of the first
+        # `ai.streamText.doStream` generation to appear in the trace (earliest
+        # startTime). Restrict to that name so other generation types can't
+        # take its place; fall back to the overall earliest if none match.
+        stream_gens = [
+            g for g in gens_sorted if g.get("name") == TTFT_GENERATION_NAME
+        ]
+        ttft_source = stream_gens[0] if stream_gens else first
+        ttft, _ = compute_timings(ttft_source)
 
         starts = [parse_ts(o.get("startTime")) for o in gens]
         ends = [parse_ts(o.get("endTime")) for o in gens]
