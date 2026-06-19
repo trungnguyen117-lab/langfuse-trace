@@ -86,10 +86,10 @@ class LangfuseClient:
     ) -> list[dict]:
         """Fetch all GENERATION observations matching the filters (paginated).
 
-        The v2 API returns only `core` + `basic` fields by default, which omits
-        `completionStartTime` (in `time`) and `input`/`output` (in `io`). We
-        request those groups explicitly, otherwise TTFT and the question/answer
-        text would always come back empty.
+        Uses the stable v1 `GET /api/public/observations` endpoint, which works
+        on self-hosted Langfuse and returns full observation objects (including
+        `completionStartTime`, `input` and `output`) by default. The v2
+        endpoint with its `fields` selector is Beta and currently Cloud-only.
         """
         observations: list[dict] = []
         page = 1
@@ -98,7 +98,6 @@ class LangfuseClient:
                 "type": "GENERATION",
                 "limit": PAGE_LIMIT,
                 "page": page,
-                "fields": "core,basic,time,io,model",
             }
             if trace_id is not None:
                 params["traceId"] = trace_id
@@ -109,7 +108,7 @@ class LangfuseClient:
             if name is not None:
                 params["name"] = name
 
-            payload = self._get("/api/public/v2/observations", params)
+            payload = self._get("/api/public/observations", params)
             observations.extend(payload.get("data", []))
 
             meta = payload.get("meta", {})
