@@ -55,10 +55,8 @@ DEFAULT_BASE_URL = "https://cloud.langfuse.com"
 PAGE_LIMIT = 100
 REQUEST_TIMEOUT = 30
 # The generation whose timeToFirstToken defines the question's TTFT — the first
-# streamed model call inside the lightdash-agent.stream span.
+# streamed model call to appear in the trace.
 TTFT_GENERATION_NAME = "ai.streamText.doStream"
-# The agent span that the TTFT generation must live under.
-TTFT_ROOT_SPAN_NAME = "lightdash-agent.stream"
 
 
 class LangfuseClient:
@@ -244,50 +242,12 @@ def earliest_start(obs: dict) -> datetime:
     return ts if ts is not None else datetime.max.replace(tzinfo=timezone.utc)
 
 
-def _descends_from_span(
-    obs: dict, by_id: dict[str, dict], span_name: str, max_depth: int = 50
-) -> bool:
-    """True if `obs` has an ancestor observation named `span_name`.
-
-    Walks up the `parentObservationId` chain (guarding against cycles and
-    missing links).
-    """
-    parent_id = obs.get("parentObservationId")
-    depth = 0
-    while parent_id and depth < max_depth:
-        parent = by_id.get(parent_id)
-        if parent is None:
-            break
-        if parent.get("name") == span_name:
-            return True
-        parent_id = parent.get("parentObservationId")
-        depth += 1
-    return False
-
-
-def select_ttft_generation(
-    trace: dict, generations_sorted: list[dict]
-) -> dict | None:
+def select_ttft_generation(generations_sorted: list[dict]) -> dict | None:
     """Pick the generation whose `timeToFirstToken` defines the question's TTFT.
 
-    Preference order:
-      1. The earliest `ai.streamText.doStream` that lives under the
-         `lightdash-agent.stream` span (uses the trace's full observation tree).
-      2. The earliest `ai.streamText.doStream` among the fetched generations.
-      3. The overall earliest generation.
+    The first `ai.streamText.doStream` to appear (earliest startTime); falls
+    back to the overall earliest generation when none match.
     """
-    all_obs = (trace or {}).get("observations") or []
-    by_id = {o.get("id"): o for o in all_obs if o.get("id")}
-    inside = [
-        o
-        for o in all_obs
-        if o.get("type") == "GENERATION"
-        and o.get("name") == TTFT_GENERATION_NAME
-        and _descends_from_span(o, by_id, TTFT_ROOT_SPAN_NAME)
-    ]
-    if inside:
-        return min(inside, key=earliest_start)
-
     stream = [
         g for g in generations_sorted if g.get("name") == TTFT_GENERATION_NAME
     ]
@@ -341,9 +301,8 @@ def group_into_questions(
                 trace = {}
 
         # TTFT of the question = timeToFirstToken of the first
-        # `ai.streamText.doStream` that lives under the lightdash-agent.stream
-        # span (resolved via the trace's observation tree).
-        ttft_source = select_ttft_generation(trace, gens_sorted)
+        # `ai.streamText.doStream` to appear (earliest startTime).
+        ttft_source = select_ttft_generation(gens_sorted)
         ttft, _ = compute_timings(ttft_source) if ttft_source else (None, None)
 
         # Total time = the trace's own latency when available, else span from
@@ -454,10 +413,9 @@ def cmd_trace(args: argparse.Namespace) -> None:
 
     gens_sorted = sorted(generations, key=earliest_start)
     # TTFT of the question = timeToFirstToken of the first ai.streamText.doStream
-    # under the lightdash-agent.stream span. Q&A: prefer the trace's own
-    # input/output, else fall back to the first call's input / last call's
-    # output.
-    ttft_source = select_ttft_generation(trace, gens_sorted)
+    # to appear. Q&A: prefer the trace's own input/output, else fall back to the
+    # first call's input / last call's output.
+    ttft_source = select_ttft_generation(gens_sorted)
     question_ttft, _ = (
         compute_timings(ttft_source) if ttft_source else (None, None)
     )
