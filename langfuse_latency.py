@@ -311,7 +311,9 @@ def group_into_questions(
                 # back to the first generation's name.
                 "name": trace.get("name") or first.get("name") or "",
                 "start_time": min(starts).isoformat() if starts else "",
-                "generations": len(gens),
+                # Total observations in the trace (SPAN + EVENT + GENERATION),
+                # from the trace payload; fall back to the generation count.
+                "observations": len(trace.get("observations") or []) or len(gens),
                 "ttft_seconds": ttft,
                 "total_seconds": total,
                 "question": question,
@@ -457,13 +459,13 @@ def cmd_range(args: argparse.Namespace) -> None:
     )
 
     header = (
-        f"{'start_time':<26} {'gens':>5} {'TTFT':>10} {'total':>10}  question"
+        f"{'start_time':<26} {'obs':>5} {'TTFT':>10} {'total':>10}  question"
     )
     print(header)
     print("-" * len(header))
     for q in questions:
         print(
-            f"{q['start_time']:<26} {q['generations']:>5} "
+            f"{q['start_time']:<26} {q['observations']:>5} "
             f"{fmt(q['ttft_seconds']):>10} {fmt(q['total_seconds']):>10}  "
             f"{truncate(q['question'], 60)}"
         )
@@ -494,7 +496,7 @@ def cmd_range(args: argparse.Namespace) -> None:
                     "trace_id",
                     "name",
                     "start_time",
-                    "generations",
+                    "observations",
                     "ttft_seconds",
                     "total_seconds",
                     "question",
